@@ -24,10 +24,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from collections import deque
 
 # 导入自定义模块(仿真时去掉了前面的点，正式运行需要补上)
-from chart_renderer import ChartRenderer
-from interpolation import TrajectoryInterpolator
-from landing_analyzer import LandingAnalyzer
-from trajectory_recorder import TrajectoryRecorder
+from .chart_renderer import ChartRenderer
+from .interpolation import TrajectoryInterpolator
+from .landing_analyzer import LandingAnalyzer
+from .trajectory_recorder import TrajectoryRecorder
 
 # 添加exlcm模块路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -841,7 +841,7 @@ class BallTrajectorySimulator:
         # 如果你的单位是 mm，速度可能达到几千，beta 需要设得很小，例如 0.001 或 0.0001
         # 如果单位是 m，速度是 10 左右，beta 可以设为 0.5 或 1.0
         # 鉴于你的数据 X,Y,Z 看起来是毫米 (如 559.071)，beta 建议设小一点。
-        self.one_euro_filter = OneEuroFilter(min_cutoff=0.5, beta=0.001, d_cutoff=1.0)
+        self.one_euro_filter = OneEuroFilter(min_cutoff=1.5, beta=0.05, d_cutoff=1.0)
         
         self.last_valid_pos = None     
         self.max_jump_distance = 400.0 # 稍微放宽一点，避免高速球被误删
@@ -2468,64 +2468,61 @@ class BallTrajectorySimulator:
             print(f"❌ 处理球位置更新失败: {e}")
             logger.error(f"Failed to process ball position update: {str(e)}")
 
+
     def process_realtime_position_update(self, pos, current_time):
-        """处理实时位置更新（One-Euro Filter 优化版）"""
+        """处理实时位置更新（性能优化版）"""
         try:
-            # 转换为 numpy 数组以便计算
             raw_pos = np.array([pos[0], pos[1], pos[2]])
 
-            # --- 步骤A: 简单的异常值剔除 (距离门限) ---
+            # --- 1. 距离异常跳变过滤 ---
             if self.last_valid_pos is not None:
                 dist = np.linalg.norm(raw_pos - self.last_valid_pos)
-                
-                # 如果距离过大，可能是误检。但如果是新回合的发球，距离也会很大。
-                # 简单的判断：如果 Z 轴变化不大但 XY 剧变，或者距离远超物理极限(如 10ms 飞了 50cm)
-                if dist > self.max_jump_distance:
-                    # 检查是否可能是新回合（例如很久没有收到数据了，或者球回到了发球位置）
-                    # 这里简单处理：如果距离实在太大，认为是噪点丢弃
-                    # print(f"🗑️ 剔除噪点: 距离 {dist:.1f} > {self.max_jump_distance}")
+                # 物理限制过滤：乒乓球在10ms内不太可能移动超过500mm
+                if dist > 500.0: 
                     return 
 
-            # --- 步骤B: 使用 One-Euro Filter 平滑 ---
-            # 这里的 current_time 必须是秒单位 (你的代码外部似乎已经处理了微秒转秒)
+            # --- 2. 滤波计算 ---
             filtered_pos = self.one_euro_filter.filter(raw_pos, current_time)
-
-            # 更新上一个有效点 (注意：更新的是平滑后的点，还是原始点，取决于策略，通常存平滑后的)
             self.last_valid_pos = filtered_pos
 
-            # --- 后续逻辑使用平滑后的数据 (filtered_pos) ---
-            
-            # 更新当前状态
+            # --- 3. 核心逻辑处理（但不立即触发重绘） ---
             self.current_time = current_time
             self.frame_count = getattr(self, 'frame_count', 0) + 1
 
-            # 计算速度和趋势 (使用 filtered_pos)
-            if hasattr(self, "prev_realtime_pos") and hasattr(self, "prev_realtime_time") and \
-            self.prev_realtime_pos is not None and self.prev_realtime_time is not None:
-                
-                speed, y_trend_changed, current_y_trend = (
-                    self.trajectory_recorder.analyze_speed_and_trend(
-                        filtered_pos, self.prev_realtime_pos, current_time, self.prev_realtime_time
-                    )
+            # 计算速度与趋势
+            if hasattr(self, "prev_realtime_pos") and self.prev_realtime_pos is not None:
+                speed, y_trend_changed, current_y_trend = self.trajectory_recorder.analyze_speed_and_trend(
+                    filtered_pos, self.prev_realtime_pos, current_time, self.prev_realtime_time
                 )
-                # 更新显示
-                shot_count = self.trajectory_recorder.get_shot_count()
-                self.update_speed_display(speed, shot_count)
+                # 仅在趋势变化或低频更新显示，避免UI主线程拥塞
+                if self.frame_count % 3 == 0: 
+                    shot_count = self.trajectory_recorder.get_shot_count()
+                    self.update_speed_display(speed, shot_count)
 
-            # 复用核心处理逻辑 (更新3D图、落点检测等)
-            self._process_ball_position_update(
-                filtered_pos, current_time, getattr(self, "_realtime_trajectory_index", 0), is_realtime=True
-            )
+            # --- 4. 优化后的 3D 渲染控制 ---
+            if hasattr(self, "plt") and self.plt:
+                # 只增加球的位置，但不一定每一帧都调用 self.plt.updatePlot()
+                # updatePlot 涉及 OpenGL 上下文切换，开销很大
+                self.plt.addNewBall(filtered_pos)
+                
+                # 渲染限帧：例如每 2 帧或 3 帧刷新一次 OpenGL 视口 (约 30-60 fps)
+                if self.frame_count % 2 == 0:
+                    self.plt.updatePlot()
 
-            # 保存前一个位置信息
+            # 记录数据（放到后台或优化后的逻辑中）
+            self.record_trajectory_data_point(filtered_pos)
+
+            # 处理落点分析（仅在低高度触发）
+            if filtered_pos[2] < 80:
+                self._analyze_realtime_landing(filtered_pos, current_time)
+
+            # 更新状态指针
             self.prev_realtime_pos = filtered_pos.copy()
             self.prev_realtime_time = current_time
-            self._realtime_trajectory_index = getattr(self, "_realtime_trajectory_index", 0) + 1
 
         except Exception as e:
             print(f"❌ 实时位置更新处理失败: {e}")
-            import traceback
-            traceback.print_exc()
+
 
     def _analyze_realtime_landing(self, pos, current_time):
         """分析实时数据的落点
