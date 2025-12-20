@@ -2470,111 +2470,109 @@ class BallTrajectorySimulator:
 
 
     def process_realtime_position_update(self, pos, current_time):
-        """处理实时位置更新（性能优化版）"""
+        """处理实时位置更新（移除滤波后的高性能版）"""
         try:
+            # 直接将输入坐标转为数组，不经过滤波器处理
             raw_pos = np.array([pos[0], pos[1], pos[2]])
 
-            # --- 1. 距离异常跳变过滤 ---
+            # 1. 极简异常值剔除：仅过滤掉物理上不可能的瞬移点
             if self.last_valid_pos is not None:
                 dist = np.linalg.norm(raw_pos - self.last_valid_pos)
-                # 物理限制过滤：乒乓球在10ms内不太可能移动超过500mm
+                # 如果 10ms 内球移动超过 50cm，视为无效噪点，直接丢弃
                 if dist > 500.0: 
                     return 
 
-            # --- 2. 滤波计算 ---
-            filtered_pos = self.one_euro_filter.filter(raw_pos, current_time)
-            self.last_valid_pos = filtered_pos
-
-            # --- 3. 核心逻辑处理（但不立即触发重绘） ---
+            # 更新有效点记录
+            self.last_valid_pos = raw_pos
             self.current_time = current_time
             self.frame_count = getattr(self, 'frame_count', 0) + 1
 
-            # 计算速度与趋势
+            # 2. 计算速度与趋势分析
             if hasattr(self, "prev_realtime_pos") and self.prev_realtime_pos is not None:
-                speed, y_trend_changed, current_y_trend = self.trajectory_recorder.analyze_speed_and_trend(
-                    filtered_pos, self.prev_realtime_pos, current_time, self.prev_realtime_time
+                # 记录速度
+                speed, y_trend_changed, current_y_trend = (
+                    self.trajectory_recorder.analyze_speed_and_trend(
+                        raw_pos, self.prev_realtime_pos, current_time, self.prev_realtime_time
+                    )
                 )
-                # 仅在趋势变化或低频更新显示，避免UI主线程拥塞
-                if self.frame_count % 3 == 0: 
+                
+                # UI 文本刷新控制：每 3 帧更新一次数字，减少 PyQt 布局开销
+                if self.frame_count % 3 == 0:
                     shot_count = self.trajectory_recorder.get_shot_count()
                     self.update_speed_display(speed, shot_count)
 
-            # --- 4. 优化后的 3D 渲染控制 ---
+            # 3. 核心更新逻辑：直接提交 raw_pos
+            self._process_ball_position_update(
+                raw_pos, current_time, getattr(self, "_realtime_trajectory_index", 0), is_realtime=True
+            )
+
+            # 4. 渲染频率平衡：防止 OpenGL 刷新过快导致的主线程阻塞
             if hasattr(self, "plt") and self.plt:
-                # 只增加球的位置，但不一定每一帧都调用 self.plt.updatePlot()
-                # updatePlot 涉及 OpenGL 上下文切换，开销很大
-                self.plt.addNewBall(filtered_pos)
-                
-                # 渲染限帧：例如每 2 帧或 3 帧刷新一次 OpenGL 视口 (约 30-60 fps)
+                # addNewBall 仅添加数据点，更新非常快
+                self.plt.addNewBall(raw_pos)
+                # 渲染绘制：控制在约 60FPS 左右（假设数据源为 100Hz+，则隔帧绘制）
                 if self.frame_count % 2 == 0:
                     self.plt.updatePlot()
 
-            # 记录数据（放到后台或优化后的逻辑中）
-            self.record_trajectory_data_point(filtered_pos)
-
-            # 处理落点分析（仅在低高度触发）
-            if filtered_pos[2] < 80:
-                self._analyze_realtime_landing(filtered_pos, current_time)
-
-            # 更新状态指针
-            self.prev_realtime_pos = filtered_pos.copy()
+            # 更新历史状态
+            self.prev_realtime_pos = raw_pos.copy()
             self.prev_realtime_time = current_time
+            self._realtime_trajectory_index = getattr(self, "_realtime_trajectory_index", 0) + 1
 
         except Exception as e:
-            print(f"❌ 实时位置更新处理失败: {e}")
+            print(f"❌ 实时位置处理失败: {e}")
 
+        def _analyze_realtime_landing(self, pos, current_time):
+            """分析实时数据的落点
 
-    def _analyze_realtime_landing(self, pos, current_time):
-        """分析实时数据的落点
-
-        Args:
-            pos: 当前位置坐标
-            current_time: 当前时间戳
-        """
-        try:
-            # 使用落点分析模块进行实时落点分析
-            landing_detected = self.landing_analyzer.analyze_realtime_landing(pos, current_time)
-            
-            # 如果检测到落点，更新图表显示（复用轨迹渲染模式的逻辑）
-            if landing_detected:
-                print("🎯 实时落点检测完成，更新热力图和散点图")
+            Args:
+                pos: 当前位置坐标
+                current_time: 当前时间戳
+            """
+            try:
+                # 使用落点分析模块进行实时落点分析
+                landing_detected = self.landing_analyzer.analyze_realtime_landing(pos, current_time)
                 
-                # 检查是否需要增加拍数（基于Y轴趋势变化）
-                if hasattr(self, "prev_realtime_pos") and hasattr(self, "prev_realtime_time") and \
-                   self.prev_realtime_pos is not None and self.prev_realtime_time is not None:
+                # 如果检测到落点，更新图表显示（复用轨迹渲染模式的逻辑）
+                if landing_detected:
+                    print("🎯 实时落点检测完成，更新热力图和散点图")
                     
-                    # 计算当前Y轴趋势
-                    current_y = pos[1]
-                    prev_y = self.prev_realtime_pos[1]
-                    
-                    if current_y is not None and prev_y is not None:
-                        # 确定Y轴趋势
-                        if current_y > prev_y:
-                            current_y_trend = "上升"
-                        elif current_y < prev_y:
-                            current_y_trend = "下降"
-                        else:
-                            current_y_trend = "水平"
+                    # 检查是否需要增加拍数（基于Y轴趋势变化）
+                    if hasattr(self, "prev_realtime_pos") and hasattr(self, "prev_realtime_time") and \
+                    self.prev_realtime_pos is not None and self.prev_realtime_time is not None:
                         
-                        # 检查趋势是否发生变化
-                        if hasattr(self, "prev_realtime_y_trend") and \
-                           self.prev_realtime_y_trend is not None and \
-                           self.prev_realtime_y_trend != current_y_trend:
+                        # 计算当前Y轴趋势
+                        current_y = pos[1]
+                        prev_y = self.prev_realtime_pos[1]
+                        
+                        if current_y is not None and prev_y is not None:
+                            # 确定Y轴趋势
+                            if current_y > prev_y:
+                                current_y_trend = "上升"
+                            elif current_y < prev_y:
+                                current_y_trend = "下降"
+                            else:
+                                current_y_trend = "水平"
                             
-                            # 趋势发生变化，增加拍数
-                            shot_count = self.trajectory_recorder.get_shot_count()
-                            print(f"🎯 实时模式检测到Y轴趋势变化: {self.prev_realtime_y_trend} -> {current_y_trend}")
-                            print(f"📊 当前拍数: {shot_count}")
-                        
-                        # 更新前一个Y轴趋势
-                        self.prev_realtime_y_trend = current_y_trend
-                
-                self.update_heatmap_display()
-                self.update_scatter_display()
+                            # 检查趋势是否发生变化
+                            if hasattr(self, "prev_realtime_y_trend") and \
+                            self.prev_realtime_y_trend is not None and \
+                            self.prev_realtime_y_trend != current_y_trend:
+                                
+                                # 趋势发生变化，增加拍数
+                                shot_count = self.trajectory_recorder.get_shot_count()
+                                print(f"🎯 实时模式检测到Y轴趋势变化: {self.prev_realtime_y_trend} -> {current_y_trend}")
+                                print(f"📊 当前拍数: {shot_count}")
+                            
+                            # 更新前一个Y轴趋势
+                            self.prev_realtime_y_trend = current_y_trend
+                    
+                    self.update_heatmap_display()
+                    self.update_scatter_display()
 
-        except Exception as e:
-            print(f"❌ 实时落点分析失败: {e}")
-            logger.error(f"Failed to analyze realtime landing: {str(e)}")
+            except Exception as e:
+                print(f"❌ 实时落点分析失败: {e}")
+                logger.error(f"Failed to analyze realtime landing: {str(e)}")
 
     def _record_landing_point(self, timestamp, position):
         """记录落点坐标到统计中"""
