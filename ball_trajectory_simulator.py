@@ -1132,6 +1132,14 @@ class BallTrajectorySimulator:
         self.eval_serve_btn.show()
         self.main_widget.eval_serve_btn = self.eval_serve_btn # 保存引用
 
+        # 在 eval_serve_btn 下方添加一个查看分布的按钮
+        self.view_stats_btn = QPushButton("Serve History", self.main_widget)
+        self.view_stats_btn.setStyleSheet(self.local_monitor_btn.styleSheet()) # 复用样式
+        self.view_stats_btn.setFixedSize(150, 36)
+        self.view_stats_btn.clicked.connect(self.show_serve_history_stats)
+        self.view_stats_btn.show()
+        # 更新 UI 位置逻辑中也要加上这一行
+
         # 创建控制按钮层（初始隐藏）
         self.button_frame = QFrame(self.main_widget)
         self.button_frame.setAttribute(Qt.WA_TranslucentBackground)
@@ -1313,6 +1321,42 @@ class BallTrajectorySimulator:
         self._init_realtime_render_button_state()
 
         self.main_widget.show()
+
+    def show_serve_history_stats(self):
+        """展示发球落点分布统计图"""
+        history_file = os.path.join(self.save_folder_path or ".", "serve_stats/serve_history.csv")
+        if not os.path.exists(history_file):
+            QMessageBox.information(self.main_widget, "空空如也", "还没有任何发球历史数据。")
+            return
+            
+        # 这里你可以复用 ChartRenderer 的逻辑
+        # 或者直接弹出一个基于你现有 heatmap 逻辑生成的汇总图
+        QMessageBox.information(self.main_widget, "统计提示", "当前历史落点已同步到下方的 Heatmap 和 Scatter 图中。")
+        self.update_heatmap_display()
+
+    def save_serve_to_history(self, report):
+            """将单次发球结果存入历史数据库 (CSV)"""
+            import csv
+            # 确定存档路径
+            history_dir = os.path.join(self.save_folder_path or ".", "serve_stats")
+            os.makedirs(history_dir, exist_ok=True)
+            history_file = os.path.join(history_dir, "serve_history.csv")
+            
+            file_exists = os.path.exists(history_file)
+            
+            with open(history_file, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["Time", "Max_Speed_ms", "Peak_H_mm", "Landing_X", "Landing_Y", "Duration_s"])
+                
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    f"{report['max_speed']:.2f}",
+                    f"{report['peak_height']:.1f}",
+                    f"{report['landing_x']:.1f}",
+                    f"{report['landing_y']:.1f}",
+                    f"{report['duration']:.2f}"
+                ])
 
     def _smooth_and_filter(self):
         """
@@ -2474,59 +2518,6 @@ class BallTrajectorySimulator:
             logger.error(f"Failed to process ball position update: {str(e)}")
 
 
-    # def process_realtime_position_update(self, pos, current_time):
-    #     """处理实时位置更新（性能优化版）"""
-    #     try:
-    #         raw_pos = np.array([pos[0], pos[1], pos[2]])
-
-    #         # --- 1. 距离异常跳变过滤 ---
-    #         if self.last_valid_pos is not None:
-    #             dist = np.linalg.norm(raw_pos - self.last_valid_pos)
-    #             # 物理限制过滤：乒乓球在10ms内不太可能移动超过500mm
-    #             if dist > 500.0: 
-    #                 return 
-
-    #         # --- 2. 滤波计算 ---
-    #         filtered_pos = self.one_euro_filter.filter(raw_pos, current_time)
-    #         self.last_valid_pos = filtered_pos
-
-    #         # --- 3. 核心逻辑处理（但不立即触发重绘） ---
-    #         self.current_time = current_time
-    #         self.frame_count = getattr(self, 'frame_count', 0) + 1
-
-    #         # 计算速度与趋势
-    #         if hasattr(self, "prev_realtime_pos") and self.prev_realtime_pos is not None:
-    #             speed, y_trend_changed, current_y_trend = self.trajectory_recorder.analyze_speed_and_trend(
-    #                 filtered_pos, self.prev_realtime_pos, current_time, self.prev_realtime_time
-    #             )
-    #             # 仅在趋势变化或低频更新显示，避免UI主线程拥塞
-    #             if self.frame_count % 3 == 0: 
-    #                 shot_count = self.trajectory_recorder.get_shot_count()
-    #                 self.update_speed_display(speed, shot_count)
-
-    #         # --- 4. 优化后的 3D 渲染控制 ---
-    #         if hasattr(self, "plt") and self.plt:
-    #             # 只增加球的位置，但不一定每一帧都调用 self.plt.updatePlot()
-    #             # updatePlot 涉及 OpenGL 上下文切换，开销很大
-    #             self.plt.addNewBall(filtered_pos)
-                
-    #             # 渲染限帧：例如每 2 帧或 3 帧刷新一次 OpenGL 视口 (约 30-60 fps)
-    #             if self.frame_count % 2 == 0:
-    #                 self.plt.updatePlot()
-
-    #         # 记录数据（放到后台或优化后的逻辑中）
-    #         self.record_trajectory_data_point(filtered_pos)
-
-    #         # 处理落点分析（仅在低高度触发）
-    #         if filtered_pos[2] < 80:
-    #             self._analyze_realtime_landing(filtered_pos, current_time)
-
-    #         # 更新状态指针
-    #         self.prev_realtime_pos = filtered_pos.copy()
-    #         self.prev_realtime_time = current_time
-
-    #     except Exception as e:
-    #         print(f"❌ 实时位置更新处理失败: {e}")
 
     def process_realtime_position_update(self, pos, current_time):
         """处理实时位置更新（移除滤波后的高性能版）"""
@@ -4431,6 +4422,21 @@ class BallTrajectorySimulator:
             # 1. 解码消息
             msg = exlcm.ball_position_t.decode(data)
             current_ts = time.time()
+
+            # [乒乓球评估]调用处理器
+            res = self.processor.process_realtime_step([msg.x, msg.y, msg.z], current_ts)
+            filtered_pos, speed, events = res
+            
+            if filtered_pos is not None:
+                # --- 新增：评估模式抓取数据 ---
+                if self.is_evaluating_serve:
+                    self.serve_data.append({'pos': filtered_pos, 'time': current_ts})
+                    
+                    # 如果检测到落点，自动停止并分析
+                    if events.get("landing_detected"):
+                        # 延迟一点点停止，为了抓取到撞击瞬间的完整轨迹
+                        QTimer.singleShot(300, self.stop_serve_evaluation)
+            # ---------------------------
             
             # 2. 调用处理器（执行滤波、去噪、落点分析等核心算法）
             res = self.processor.process_realtime_step([msg.x, msg.y, msg.z], current_ts)
@@ -5107,47 +5113,76 @@ class BallTrajectorySimulator:
         else:
             print("❌ 未记录到有效的发球数据")
 
-    def analyze_serve_quality(self):
-        """计算并显示发球质量报告"""
-        try:
-            start_point = self.serve_data[0]['pos']
-            end_point = self.serve_data[-1]['pos']
-            start_time = self.serve_data[0]['time']
-            end_time = self.serve_data[-1]['time']
-            duration = end_time - start_time
+    # def analyze_serve_quality(self):
+    #     """计算并显示发球质量报告"""
+    #     try:
+    #         start_point = self.serve_data[0]['pos']
+    #         end_point = self.serve_data[-1]['pos']
+    #         start_time = self.serve_data[0]['time']
+    #         end_time = self.serve_data[-1]['time']
+    #         duration = end_time - start_time
             
-            # 计算总飞行距离（累加每一帧的距离）
-            total_dist = 0
-            for i in range(1, len(self.serve_data)):
-                p1 = np.array(self.serve_data[i-1]['pos'])
-                p2 = np.array(self.serve_data[i]['pos'])
-                total_dist += np.linalg.norm(p2 - p1)
+    #         # 计算总飞行距离（累加每一帧的距离）
+    #         total_dist = 0
+    #         for i in range(1, len(self.serve_data)):
+    #             p1 = np.array(self.serve_data[i-1]['pos'])
+    #             p2 = np.array(self.serve_data[i]['pos'])
+    #             total_dist += np.linalg.norm(p2 - p1)
             
-            # 计算平均速度 (mm/s -> m/s)
-            avg_speed = (total_dist / 1000.0) / duration if duration > 0 else 0
+    #         # 计算平均速度 (mm/s -> m/s)
+    #         avg_speed = (total_dist / 1000.0) / duration if duration > 0 else 0
             
-            # 生成评语
-            quality = "普通"
-            if avg_speed > 12.0: quality = "极快"
-            elif avg_speed < 4.0: quality = "过慢"
+    #         # 生成评语
+    #         quality = "普通"
+    #         if avg_speed > 12.0: quality = "极快"
+    #         elif avg_speed < 4.0: quality = "过慢"
             
-            # 简单的落点判断 (假设 x=0 是中线)
-            landing_x = end_point[0]
-            if abs(landing_x) > 600:
-                quality += " (大角度)"
+    #         # 简单的落点判断 (假设 x=0 是中线)
+    #         landing_x = end_point[0]
+    #         if abs(landing_x) > 600:
+    #             quality += " (大角度)"
             
-            msg = (f"⏱️ 飞行时间: {duration:.2f} s\n"
-                   f"🚀 平均球速: {avg_speed:.2f} m/s\n"
-                   f"📍 落点坐标: X={end_point[0]:.0f}, Y={end_point[1]:.0f}\n"
-                   f"⭐ 综合评价: {quality}")
+    #         msg = (f"⏱️ 飞行时间: {duration:.2f} s\n"
+    #                f"🚀 平均球速: {avg_speed:.2f} m/s\n"
+    #                f"📍 落点坐标: X={end_point[0]:.0f}, Y={end_point[1]:.0f}\n"
+    #                f"⭐ 综合评价: {quality}")
                    
-            print(f"\n📊 === 发球评估报告 ===\n{msg}")
+    #         print(f"\n📊 === 发球评估报告 ===\n{msg}")
             
-            QMessageBox.information(self.main_widget, "Serve Analysis", msg)
+    #         QMessageBox.information(self.main_widget, "Serve Analysis", msg)
             
-        except Exception as e:
-            print(f"❌ 分析发球数据失败: {e}")
+    #     except Exception as e:
+    #         print(f"❌ 分析发球数据失败: {e}")
 
+    def analyze_serve_quality(self):
+        """计算质量并弹出精美的评估报告"""
+        report = self.processor.get_serve_features(self.serve_data)
+        
+        if not report:
+            QMessageBox.warning(self.main_widget, "提醒", "采集点过少，无法分析发球。")
+            return
+
+        # 保存到历史记录
+        self.save_serve_to_history(report)
+
+        # 构建展示信息
+        result_text = (
+            f"📊 <b style='color:#E67E22;'>发球评测报告</b><br><br>"
+            f"🚀 <b>最高瞬时球速:</b> {report['max_speed']:.2f} m/s<br>"
+            f"🔝 <b>轨迹最高点:</b> {report['peak_height']:.1f} mm<br>"
+            f"📍 <b>落点坐标:</b> ({report['landing_x']:.0f}, {report['landing_y']:.0f})<br>"
+            f"⏱️ <b>飞行时长:</b> {report['duration']:.2f} s<br><br>"
+            f"💡 <i>提示：发球数据已自动归档，可点击历史统计查看。</i>"
+        )
+        
+        msg_box = QMessageBox(self.main_widget)
+        msg_box.setWindowTitle("发球诊断完成")
+        msg_box.setText(result_text)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
+        
+        # 分析完后立即更新热力图（查看历史分布）
+        self.update_heatmap_display()
 
 def main():
     """主函数."""

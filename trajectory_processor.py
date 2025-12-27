@@ -68,6 +68,9 @@ class TrajectoryProcessor:
         self.prev_time = None
         self.frame_count = 0
 
+        self.is_evaluating = False
+        self.current_serve_buffer = []  # 用于存储当前发球的轨迹点序列
+
     def process_realtime_step(self, raw_pos, timestamp):
         """核心算法逻辑：断流检测 -> 预测去噪 -> 动态滤波 -> 状态更新"""
         pos = np.array(raw_pos)
@@ -148,3 +151,81 @@ class TrajectoryProcessor:
         self.prev_time = None
         self.frame_count = 0
         self.landing_analyzer.reset_landing_analysis()
+    
+    def start_serve_session(self):
+        """开启发球采集"""
+        self.is_evaluating = True
+        self.current_serve_buffer = []
+        print("🚀 发球监控已就绪...")
+
+    def stop_serve_session(self):
+        """结束采集并返回结果"""
+        self.is_evaluating = False
+        if not self.current_serve_buffer:
+            return None
+        
+        result = self.analyze_current_serve()
+        self.current_serve_buffer = []
+        return result
+
+    def analyze_current_serve(self):
+        """分析缓冲区内的发球质量"""
+        if len(self.current_serve_buffer) < 5:
+            return None
+
+        # 提取位置和时间
+        positions = np.array([p['pos'] for p in self.current_serve_buffer])
+        times = np.array([p['time'] for p in self.current_serve_buffer])
+        
+        # 计算特征
+        # 1. 峰值速度 (m/s)
+        deltas = np.diff(positions, axis=0) / 1000.0 # 转为米
+        dts = np.diff(times)
+        speeds = [np.linalg.norm(d)/dt for d, dt in zip(deltas, dts) if dt > 0]
+        max_speed = max(speeds) if speeds else 0
+        avg_speed = np.mean(speeds) if speeds else 0
+
+        # 2. 轨迹弧度 (最高点高度)
+        max_height = np.max(positions[:, 2])
+
+        # 3. 落点 (最后一个有效点，或高度最低点)
+        landing_point = positions[-1] 
+
+        return {
+            "max_speed": max_speed,
+            "avg_speed": avg_speed,
+            "max_height": max_height,
+            "landing_x": landing_point[0],
+            "landing_y": landing_point[1],
+            "trajectory": positions.tolist(), # 用于回放
+            "timestamp": times[0]
+        }
+    
+    def get_serve_features(self, points):
+        """分析整段发球轨迹的特征"""
+        if len(points) < 5:
+            return None
+        
+        pos_array = np.array([p['pos'] for p in points])
+        time_array = np.array([p['time'] for p in points])
+        
+        # 1. 计算峰值速度 (m/s)
+        dist = np.linalg.norm(np.diff(pos_array, axis=0), axis=1) / 1000.0
+        dt = np.diff(time_array)
+        dt[dt == 0] = 0.001 # 防止除零
+        speeds = dist / dt
+        max_speed = np.max(speeds)
+        
+        # 2. 轨迹最高点 (mm)
+        peak_height = np.max(pos_array[:, 2])
+        
+        # 3. 最终落点 (评估精度)
+        landing_pos = pos_array[-1]
+        
+        return {
+            "max_speed": max_speed,
+            "peak_height": peak_height,
+            "landing_x": landing_pos[0],
+            "landing_y": landing_pos[1],
+            "duration": time_array[-1] - time_array[0]
+        }
